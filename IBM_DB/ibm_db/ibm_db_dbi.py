@@ -51,6 +51,10 @@ SQL_INDEX_CLUSTERED = ibm_db.SQL_INDEX_CLUSTERED
 SQL_INDEX_OTHER = ibm_db.SQL_INDEX_OTHER
 SQL_DBMS_VER = ibm_db.SQL_DBMS_VER
 SQL_DBMS_NAME = ibm_db.SQL_DBMS_NAME
+USE_WCHAR = ibm_db.USE_WCHAR
+WCHAR_YES = ibm_db.WCHAR_YES
+WCHAR_NO = ibm_db.WCHAR_NO
+FIX_RETURN_TYPE = 1
 
 # Module globals
 apilevel = '2.0'
@@ -659,6 +663,7 @@ class Connection(object):
         self._cursor_list = []
         self.__dbms_name = ibm_db.get_db_info(conn_handler, SQL_DBMS_NAME)
         self.__dbms_ver = ibm_db.get_db_info(conn_handler, SQL_DBMS_VER)
+        self.FIX_RETURN_TYPE = 1 
 
     # This method is used to get the DBMS_NAME 
     def __get_dbms_name( self ):
@@ -747,6 +752,17 @@ class Connection(object):
            Return: current setting of the resource attribute requested
         """
         return ibm_db.get_option(self.conn_handler, attr_key, 1)
+
+    # Sets FIX_RETURN_TYPE. Added for performance improvement
+    def set_fix_return_type(self, is_on):
+        try:
+          if is_on:
+            self.FIX_RETURN_TYPE = 1
+          else:
+            self.FIX_RETURN_TYPE = 0
+        except Exception, inst:
+          raise _get_exception(inst)
+        return self.FIX_RETURN_TYPE
 
     # Sets connection AUTOCOMMIT attribute
     def set_autocommit(self, is_on):
@@ -1113,7 +1129,8 @@ class Cursor(object):
         self._is_scrollable_cursor = False
         self.__connection = conn_object
         self.messages = []
-    
+        self.FIX_RETURN_TYPE = conn_object.FIX_RETURN_TYPE
+
     # This method closes the statemente associated with the cursor object.
     # It takes no argument.
     def close(self):
@@ -1417,16 +1434,19 @@ class Cursor(object):
                 row = ibm_db.fetch_tuple(self.stmt_handler)
             except Exception, inst:
                 if ibm_db.stmt_errormsg() is not None:
-                   self.messages.append(Error(str(ibm_db.stmt_errormsg())))
+                    self.messages.append(Error(str(ibm_db.stmt_errormsg())))
                 else:    
-                   self.messages.append(_get_exception(inst))
+                    self.messages.append(_get_exception(inst))
                 if len(row_list) == 0:
                     raise self.messages[len(self.messages) - 1]
                 else:
                     return row_list
             
             if row != False:
-                row_list.append(self._fix_return_data_type(row))
+                if self.FIX_RETURN_TYPE == 1:
+                    row_list.append(self._fix_return_data_type(row))
+                else:
+                    row_list.append(row)
             else:
                 return row_list
             rows_fetched = rows_fetched + 1

@@ -99,6 +99,7 @@ typedef struct _conn_handle_struct {
 	long c_bin_mode;
 	long c_case_mode;
 	long c_cursor_type;
+	long c_use_wchar;
 	int handle_active;
 	SQLSMALLINT error_recno_tracker;
 	SQLSMALLINT errormsg_recno_tracker;
@@ -187,6 +188,7 @@ typedef struct _stmt_handle_struct {
 	long s_bin_mode;
 	long cursor_type;
 	long s_case_mode;
+	long s_use_wchar;
 	SQLSMALLINT error_recno_tracker;
 	SQLSMALLINT errormsg_recno_tracker;
 
@@ -440,6 +442,7 @@ static stmt_handle *_ibm_db_new_stmt_struct(conn_handle* conn_res) {
 	stmt_res->s_bin_mode = conn_res->c_bin_mode;
 	stmt_res->cursor_type = conn_res->c_cursor_type;
 	stmt_res->s_case_mode = conn_res->c_case_mode;
+	stmt_res->s_use_wchar = conn_res->c_use_wchar;
 
 	stmt_res->head_cache_list = NULL;
 	stmt_res->current_node = NULL;
@@ -616,6 +619,34 @@ static int _python_ibm_db_assign_options( void *handle, int type, long opt_key, 
 			PyErr_SetString(PyExc_Exception, "Connection or statement handle must be passed in.");
 			return -1;
 		}
+	} else if (opt_key == USE_WCHAR) {
+        option_num = NUM2LONG(data);
+        if (type == SQL_HANDLE_STMT) {
+            switch (option_num) {
+                case WCHAR_YES:
+                    ((stmt_handle*)handle)->s_use_wchar = WCHAR_YES;
+                    break;
+                case WCHAR_NO:
+                    ((stmt_handle*)handle)->s_use_wchar = WCHAR_NO;
+                    break;
+                default:
+                    PyErr_SetString(PyExc_Exception, "USE_WCHAR attribute must be one of WCHAR_YES or WCHAR_NO");
+                    return -1;
+            }
+        }
+        else if (type == SQL_HANDLE_DBC) {
+            switch (option_num) {
+                case WCHAR_YES:
+                    ((conn_handle*)handle)->c_use_wchar = WCHAR_YES;
+                    break;
+                case WCHAR_NO:
+                    ((conn_handle*)handle)->c_use_wchar = WCHAR_NO;
+                    break;
+                default:
+                    PyErr_SetString(PyExc_Exception, "USE_WCHAR attribute must be one of WCHAR_YES or WCHAR_NO");
+                    return -1;
+            }
+        }
 	} else if (type == SQL_HANDLE_STMT) {
 		if (PyString_Check(data)|| PyUnicode_Check(data)) {
 			data = PyUnicode_FromObject(data);
@@ -819,6 +850,23 @@ static int _python_ibm_db_bind_column_helper(stmt_handle *stmt_res)
 			case SQL_CHAR:
 			case SQL_VARCHAR:
 			case SQL_LONGVARCHAR:
+			    if ( stmt_res->s_use_wchar == WCHAR_NO ) {
+                    in_length = stmt_res->column_info[i].size+1;
+                    row_data->str_val = (SQLCHAR *)ALLOC_N(char, in_length);
+                    if ( row_data->str_val == NULL ) {
+                        PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
+                        return -1;
+                    }
+                    rc = SQLBindCol((SQLHSTMT)stmt_res->hstmt, (SQLUSMALLINT)(i+1),
+                            SQL_C_CHAR, row_data->str_val, in_length,
+                            (SQLINTEGER *)(&stmt_res->row_data[i].out_length));
+                    if ( rc == SQL_ERROR ) {
+                        _python_ibm_db_check_sql_errors((SQLHSTMT)stmt_res->hstmt,
+                                SQL_HANDLE_STMT, rc, 1, NULL,
+                                -1, 1);
+                    }
+                    break;
+                }
 			case SQL_WCHAR:
 			case SQL_WVARCHAR:
 			case SQL_GRAPHIC:
@@ -1189,6 +1237,7 @@ static PyObject *_python_ibm_db_connect_helper( PyObject *self, PyObject *args, 
 
 		conn_res->c_bin_mode = IBM_DB_G(bin_mode);
 		conn_res->c_case_mode = CASE_NATURAL;
+		conn_res->c_use_wchar = WCHAR_YES;
 		conn_res->c_cursor_type = SQL_SCROLL_FORWARD_ONLY;
 
 		conn_res->error_recno_tracker = 1;
@@ -5504,7 +5553,14 @@ static int _python_ibm_db_bind_data( stmt_handle *stmt_res, param_node *curr, Py
 						break;
 					case SQL_TYPE_TIMESTAMP:
 						valueType = SQL_C_WCHAR;
-						curr->bind_indicator = SQL_NTS;
+						if( param_length == 0)
+						{
+							curr->bind_indicator = SQL_NULL_DATA;
+						}
+						else
+						{
+						    curr->bind_indicator = SQL_NTS;
+						}
 						if(curr->uvalue[10] == 'T'){
 							curr->uvalue[10] = ' ';
 						}
@@ -5632,7 +5688,14 @@ static int _python_ibm_db_bind_data( stmt_handle *stmt_res, param_node *curr, Py
 						valueType = SQL_C_CHAR;
 						curr->bind_indicator = curr->ivalue;
 						if (curr->param_type == SQL_PARAM_OUTPUT || curr->param_type == SQL_PARAM_INPUT_OUTPUT) {
-							curr->bind_indicator = SQL_NTS;
+							if( param_length == 0)
+							{
+								curr->bind_indicator = SQL_NULL_DATA;
+						    }
+							else
+							{
+							    curr->bind_indicator = SQL_NTS;
+							}
 						}
 						if(curr->svalue[10] == 'T'){
 							curr->svalue[10] = ' ';
@@ -7817,9 +7880,11 @@ static PyObject *ibm_db_result(PyObject *self, PyObject *args)
 			if (out_length == SQL_NULL_DATA) {
 				Py_INCREF(Py_None);
 				return_value = Py_None;
-			} else if (column_type == SQL_BIGINT){
-				return_value = PyLong_FromString(out_ptr, NULL, 0);
-			} else {
+			} //else if (column_type == SQL_BIGINT){
+			//	return_value = PyLong_FromString(out_ptr, NULL, 0); }
+			// Converting from Wchar string to long leads to data truncation
+			// as it treats 00 in 2 bytes for each char as NULL
+			else {
 				return_value = getSQLWCharAsPyUnicodeObject(out_ptr, out_length);
 			}
 			PyMem_Del(out_ptr);
@@ -8232,6 +8297,11 @@ static PyObject *_python_ibm_db_bind_fetch_helper(PyObject *args, int op)
 			switch(column_type) {
 				case SQL_CHAR:
 				case SQL_VARCHAR:
+				    if ( stmt_res->s_use_wchar == WCHAR_NO ) {
+                        tmp_length = stmt_res->column_info[column_number].size;
+                        value = PyBytes_FromStringAndSize((char *)row_data->str_val, out_length);
+                        break;
+                    }
 				case SQL_WCHAR:
 				case SQL_WVARCHAR:
 				case SQL_GRAPHIC:
@@ -11053,6 +11123,9 @@ INIT_ibm_db(void) {
 	PyModule_AddIntConstant(m, "CASE_NATURAL", CASE_NATURAL);
 	PyModule_AddIntConstant(m, "CASE_LOWER", CASE_LOWER);
 	PyModule_AddIntConstant(m, "CASE_UPPER", CASE_UPPER);
+	PyModule_AddIntConstant(m, "USE_WCHAR", USE_WCHAR);
+        PyModule_AddIntConstant(m, "WCHAR_YES", WCHAR_YES);
+        PyModule_AddIntConstant(m, "WCHAR_NO", WCHAR_NO);
 	PyModule_AddIntConstant(m, "SQL_ATTR_CURSOR_TYPE", SQL_ATTR_CURSOR_TYPE);
 	PyModule_AddIntConstant(m, "SQL_CURSOR_FORWARD_ONLY", SQL_CURSOR_FORWARD_ONLY);
 	PyModule_AddIntConstant(m, "SQL_CURSOR_KEYSET_DRIVEN", SQL_CURSOR_KEYSET_DRIVEN);
